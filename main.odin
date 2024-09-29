@@ -2,10 +2,9 @@ package main
 
 import "base:intrinsics"
 import "core:fmt"
-import "core:os"
 import "core:math"
 import "core:math/linalg"
-import "core:encoding/json"
+import "core:math/rand"
 
 import rl "vendor:raylib"
 
@@ -13,103 +12,99 @@ winsize :: [2]i32 {1800, 1200}
 
 scale :: 5
 
+Game :: struct {
+    player: Player,
+    monsters: [dynamic]Monster,
+    projectiles: [dynamic]Projectile,
+    spritesheets: [dynamic]SpriteSheet
+}
+
 PlayerState :: enum {
     Idle,
     Jump,
     Attack
 }
 
+ProjectileState :: enum {
+    Travel,
+    Impact
+}
+
 Player :: struct {
+    health: int,
     pos: [2]f32,
     size: [2]f32,
     vel: [2]f32,
+    attack_timer: f32,
+    attack_threshold: f32,
     state: PlayerState,
-    texture: rl.Texture,
     animations: [PlayerState]SpriteAnimation
 }
 
-SpriteAnimation :: struct {
-    current_frame: int,
-    secs_since_last_frame: f32,
-    frames: []SpriteFrame
-}
-
-SpriteSheet :: struct {
-    texture: rl.Texture,
-}
-
-SpriteFrame :: struct {
-    pos: [2]int,
-    size: [2]int,
-    duration_secs: f32
-}
-
-Monster :: struct {
+Projectile :: struct {
     pos: [2]f32,
     size: [2]f32,
     vel: [2]f32,
-    texture: rl.Texture,
+    impact_timer: f32,
+    target: ^Monster,
+    state: ProjectileState,
+    animations: [ProjectileState]SpriteAnimation
+}
+
+Monster :: struct {
+    health: int,
+    pos: [2]f32,
+    size: [2]f32,
+    vel: [2]f32,
     animation: SpriteAnimation
+}
+
+TileType :: enum {
+    Grass,
+    GrassFlower
+}
+
+Tileset :: struct {
+    rows: int,
+    cols: int,
+    tile_width: int,
+    tile_height: int,
+    texture: rl.Texture
 }
 
 main :: proc() {
     rl.InitWindow(winsize.x, winsize.y, "Survivors")
-    rl.SetTargetFPS(144)
+    rl.SetTargetFPS(60)
     rl.SetExitKey(.Q)
 
-    slime_img := rl.LoadImage("slime.png")
-    slime_txt := rl.LoadTextureFromImage(slime_img)
+    grass_img := rl.LoadImage("grass.png")
+    grass_txt := rl.LoadTextureFromImage(grass_img)
 
-    ghost_img := rl.LoadImage("ghost.png")
-    ghost_txt := rl.LoadTextureFromImage(ghost_img)
-
-    slime_json_data, ghost_json_data: json.Value
-    err: json.Error
-    {
-        slime_data, ok := os.read_entire_file("slime.json")
-        if !ok {
-            fmt.eprintfln("Failed to open slime.json")
-            return
-        }
-        slime_json_data, err = json.parse(slime_data)
-        if err != .None {
-            fmt.eprintfln("Failed to load json")
-            return
-        }
-        delete(slime_data)
+    tileset := Tileset {
+        rows = 2,
+        cols = 1,
+        tile_width = 8,
+        tile_height = 8,
+        texture = grass_txt
     }
-    defer json.destroy_value(slime_json_data)
 
-
-    {
-        ghost_data, ok := os.read_entire_file("ghost.json")
-        if !ok {
-            fmt.eprintfln("Failed to open ghost.json")
-            return
-        }
-        ghost_json_data, err = json.parse(ghost_data)
-        if err != .None {
-            fmt.eprintfln("Failed to load json")
-            return
-        }
-        delete(ghost_data)
+    game, ok := game_create()
+    if !ok {
+        fmt.eprintln("Error starting game")
+        return
     }
-    defer json.destroy_value(ghost_json_data)
-
-    fmt.printfln("tags: %v", slime_json_data.(json.Object)["meta"].(json.Object)["frameTags"])
-
-    fmt.printfln("anim: %v", load_monster_animations(ghost_json_data))
-    player := player_create(slime_txt, load_player_animations(slime_json_data))
-    monster := monster_create(ghost_txt, load_monster_animations(ghost_json_data))
 
     for !rl.WindowShouldClose() {
         dt := rl.GetFrameTime()
+
+        game_update(&game, dt)
+
         rl.BeginDrawing()
             rl.ClearBackground(rl.BLACK)
-            monster_update(&monster, &player, dt)
-            monster_draw(&monster)
-            player_update(&player, dt)
-            player_draw(&player)
+            background_draw(tileset)
+            game_draw(&game)
+
+            rl.DrawFPS(10, 10)
         rl.EndDrawing()
 
         move_directions: [2]f32
@@ -127,52 +122,78 @@ main :: proc() {
             move_directions.x = 1
         }
         move_directions = linalg.normalize0(move_directions)
-        player.vel += move_directions
+        game.player.vel += move_directions*speed
+
+        free_all(context.temp_allocator)
     }
 }
 
-load_player_animations :: proc(json_data: json.Value) -> [PlayerState]SpriteAnimation {
-    results: [PlayerState]SpriteAnimation
-    root := json_data.(json.Object)
-    frames := root["frames"].(json.Array)
-    meta := root["meta"].(json.Object)
-    frameTags := meta["frameTags"].(json.Array)
+game_create :: proc() -> (game: Game, ok: bool) {
+    spritesheets := make([dynamic]SpriteSheet)
+    slime_spritesheet := load_spritesheet("slime") or_return
+    append(&spritesheets, slime_spritesheet)
+    ghost_spritesheet := load_spritesheet("ghost") or_return
+    append(&spritesheets, ghost_spritesheet)
+    magic_missile_spritesheet := load_spritesheet("magic-missile") or_return
+    append(&spritesheets, magic_missile_spritesheet)
 
-    for tagValue in frameTags {
-        tag := tagValue.(json.Object)
-        name := tag["name"].(json.String)
-        fmt.printfln("name: %v", name)
-        from := int(tag["from"].(json.Float))
-        to := int(tag["to"].(json.Float))
-
-        state, ok := fmt.string_to_enum_value(PlayerState, name)
-
-        sprite_frames := make([]SpriteFrame, to - from + 1)
-        for i in 0..<len(sprite_frames) {
-            frame := frames[from + i].(json.Object)
-            rect := frame["frame"].(json.Object)
-            sprite_frames[i].pos = {int(rect["x"].(json.Float)), int(rect["y"].(json.Float))}
-            sprite_frames[i].size = {int(rect["w"].(json.Float)), int(rect["h"].(json.Float))}
-            sprite_frames[i].duration_secs = f32(frame["duration"].(json.Float)) / 1000
-        }
-        results[state] = SpriteAnimation {
-            current_frame = 0,
-            frames = sprite_frames
-        }
-    }
-
-    return results
+    player := player_create(slime_spritesheet)
+    monster := monster_create(ghost_spritesheet)
+    monsters := make([dynamic]Monster)
+    append(&monsters, monster)
+    projectiles := make([dynamic]Projectile)
+    
+    return Game {
+        player,
+        monsters,
+        projectiles,
+        spritesheets
+    }, true
 }
 
-player_create :: proc(texture: rl.Texture, animations: [PlayerState]SpriteAnimation) -> Player {
+game_destroy :: proc(game: ^Game) {
+    for spritesheet in game.spritesheets {
+        spritesheet_destroy(spritesheet)
+    }
+}
+
+game_update :: proc(game: ^Game, dt: f32) {
+    for &monster in game.monsters {
+        monster_update(&monster, &game.player, dt)
+    }
+    for &projectile in game.projectiles {
+        projectile_update(&projectile, game, dt)
+    }
+    player_update(&game.player, game, dt)
+}
+
+game_draw :: proc(game: ^Game) {
+    for &monster in game.monsters {
+        monster_draw(&monster)
+    }
+    for &projectile in game.projectiles {
+        projectile_draw(&projectile)
+    }
+    player_draw(&game.player)
+}
+
+player_create :: proc(spritesheet: SpriteSheet) -> Player {
+    animations: [PlayerState]SpriteAnimation
+    for state in PlayerState {
+        state_name, _ := fmt.enum_value_to_string(state)
+        animations[state] = SpriteAnimation {
+            texture = spritesheet.texture,
+            frames = spritesheet.animations[state_name]
+        }
+    }
     return Player {
         size = 8,
-        texture = texture,
+        attack_threshold = 3,
         animations = animations
     }
 }
 
-player_update :: proc(p: ^Player, dt: f32) {
+player_update :: proc(p: ^Player, game: ^Game, dt: f32) {
     player_update_animation(p, dt)
     p.pos += p.vel * dt
     max_vel := f32(50)
@@ -181,6 +202,12 @@ player_update :: proc(p: ^Player, dt: f32) {
 
     p.vel.x -= 3*p.vel.x*dt
     p.vel.y -= 3*p.vel.y*dt
+
+    p.attack_timer += dt
+    if p.attack_timer >= p.attack_threshold {
+        p.attack_timer = 0
+        append(&game.projectiles, projectile_create(game.spritesheets[2], p.pos, &game.monsters[0]))
+    }
 }
 
 player_update_animation :: proc(p: ^Player, dt: f32) {
@@ -193,8 +220,55 @@ player_update_animation :: proc(p: ^Player, dt: f32) {
     }
 }
 
+projectile_create :: proc(spritesheet: SpriteSheet, pos: [2]f32, target: ^Monster, size: [2]f32={8,8}) -> Projectile {
+    animations: [ProjectileState]SpriteAnimation
+    for state in ProjectileState {
+        state_name, _ := fmt.enum_value_to_string(state)
+        animations[state] = SpriteAnimation {
+            texture = spritesheet.texture,
+            frames = spritesheet.animations[state_name]
+        }
+    }
+    return Projectile {
+        pos, size, 20, 0, target, .Travel, animations
+    }
+}
+
+projectile_update :: proc(p: ^Projectile, game: ^Game, dt: f32) {
+    p.vel = linalg.normalize0(p.target.pos - p.pos) * linalg.length(p.vel)
+    p.pos += p.vel * dt
+    max_vel := f32(50)
+    p.vel.x = clamp(p.vel.x, -max_vel, max_vel)
+    p.vel.y = clamp(p.vel.y, -max_vel, max_vel)
+
+    if linalg.length2(p.target.pos - p.pos) < 4 {
+        p.state = .Impact
+    }
+    if p.state == .Impact {
+        p.impact_timer += dt
+        if p.impact_timer >= 0.5 {
+            unordered_remove(&game.projectiles, 0)
+            p.target.health -= 5
+        }
+    }
+}
+
+projectile_draw :: proc(p: ^Projectile) {
+    dst := rl.Rectangle{math.floor(p.pos.x)*scale, math.floor(p.pos.y)*scale, scale*p.size.x, scale*p.size.y}
+    sprite_animation_draw(p.animations[p.state], dst)
+}
+
+sprite_animation_draw :: proc(sprite_animation: SpriteAnimation, dst: rl.Rectangle) {
+    frame := sprite_animation.frames[sprite_animation.current_frame]
+    rect := rl.Rectangle {
+        f32(frame.pos.x), f32(frame.pos.y), f32(frame.size.x), f32(frame.size.y)
+    }
+    rl.DrawTexturePro(sprite_animation.texture, rect, dst, {}, 0, rl.WHITE)
+}
+
 player_draw :: proc(p: ^Player) {
-    rl.DrawTexturePro(p.texture, player_spritesheet_rect(p), {p.pos.x*scale, p.pos.y*scale, scale*p.size.x, scale*p.size.y}, {0,0}, 0, rl.WHITE)
+    dst := rl.Rectangle{math.floor(p.pos.x)*scale, math.floor(p.pos.y)*scale, scale*p.size.x, scale*p.size.y}
+    sprite_animation_draw(p.animations[p.state], dst)
 }
 
 player_spritesheet_rect :: proc(p: ^Player) -> rl.Rectangle {
@@ -205,50 +279,22 @@ player_spritesheet_rect :: proc(p: ^Player) -> rl.Rectangle {
     return rl.Rectangle {pos.x, pos.y, size.x, size.y}
 }
 
-load_monster_animations :: proc(json_data: json.Value) -> SpriteAnimation {
-    result: SpriteAnimation
-    root := json_data.(json.Object)
-    frames := root["frames"].(json.Array)
-    meta := root["meta"].(json.Object)
-    frameTags := meta["frameTags"].(json.Array)
-
-    for tagValue in frameTags {
-        tag := tagValue.(json.Object)
-        name := tag["name"].(json.String)
-        fmt.printfln("name: %v", name)
-        from := int(tag["from"].(json.Float))
-        to := int(tag["to"].(json.Float))
-
-        sprite_frames := make([]SpriteFrame, to - from + 1)
-        for i in 0..<len(sprite_frames) {
-            frame := frames[from + i].(json.Object)
-            rect := frame["frame"].(json.Object)
-            sprite_frames[i].pos = {int(rect["x"].(json.Float)), int(rect["y"].(json.Float))}
-            sprite_frames[i].size = {int(rect["w"].(json.Float)), int(rect["h"].(json.Float))}
-            sprite_frames[i].duration_secs = f32(frame["duration"].(json.Float)) / 1000
-        }
-        result = SpriteAnimation {
-            current_frame = 0,
-            frames = sprite_frames
-        }
+monster_create :: proc(spritesheet: SpriteSheet) -> Monster {
+    animation := SpriteAnimation {
+        texture = spritesheet.texture,
+        frames = spritesheet.animations["Idle"]
     }
-
-    return result
-}
-
-monster_create :: proc(texture: rl.Texture, animation: SpriteAnimation) -> Monster {
     return Monster {
         size = 8,
-        texture = texture,
         animation = animation
     }
 }
 
 monster_update :: proc(m: ^Monster, p: ^Player, dt: f32) {
     monster_update_animation(m, dt)
-    speed := f32(20)
+    speed := 40*dt
     direction := linalg.normalize0(p.pos - m.pos)
-    m.vel = speed * direction
+    m.vel += speed * direction
     m.pos += m.vel * dt
     max_vel := f32(50)
     m.vel.x = clamp(m.vel.x, -max_vel, max_vel)
@@ -269,7 +315,8 @@ monster_update_animation :: proc(m: ^Monster, dt: f32) {
 }
 
 monster_draw :: proc(m: ^Monster) {
-    rl.DrawTexturePro(m.texture, monster_spritesheet_rect(m), {m.pos.x*scale, m.pos.y*scale, scale*m.size.x, scale*m.size.y}, {0,0}, 0, rl.WHITE)
+    dst := rl.Rectangle {math.floor(m.pos.x)*scale, math.floor(m.pos.y)*scale, scale*m.size.x, scale*m.size.y}
+    sprite_animation_draw(m.animation, dst)
 }
 
 monster_spritesheet_rect :: proc(m: ^Monster) -> rl.Rectangle {
@@ -280,3 +327,26 @@ monster_spritesheet_rect :: proc(m: ^Monster) -> rl.Rectangle {
     return rl.Rectangle {pos.x, pos.y, size.x, size.y}
 }
 
+background_draw :: proc(t: Tileset) {
+    rand.reset(42069)
+    for x in 0..<winsize.x/i32(t.tile_width*scale) {
+        for y in 0..<winsize.y/i32(t.tile_height*scale) {
+            r := rand.int_max(10)
+            tile_type: TileType
+            if r > 8 {
+                tile_type = .GrassFlower
+            } else {
+                tile_type = .Grass
+            }
+            rl.DrawTexturePro(t.texture, tile_texture_rect(t, tile_type), {f32(int(x)*t.tile_width*scale), f32(int(y)*t.tile_height*scale), f32(t.tile_width*scale), f32(t.tile_height*scale)}, {0,0}, 0, rl.WHITE)
+        }
+    }
+}
+
+tile_texture_rect :: proc(t: Tileset, tile_type: TileType) -> rl.Rectangle {
+    index := int(tile_type)
+    col := index % t.cols
+    row := index / t.cols
+    pos := [2]f32 {f32(col*t.tile_width), f32(row*t.tile_height)}
+    return rl.Rectangle {pos.x, pos.y, f32(t.tile_width), f32(t.tile_height)}
+}
