@@ -46,6 +46,7 @@ Projectile :: struct {
     size: [2]f32,
     vel: [2]f32,
     impact_timer: f32,
+    done: bool,
     target: ^Monster,
     state: ProjectileState,
     animations: [ProjectileState]SpriteAnimation
@@ -158,11 +159,25 @@ game_destroy :: proc(game: ^Game) {
 }
 
 game_update :: proc(game: ^Game, dt: f32) {
-    for &monster in game.monsters {
-        monster_update(&monster, &game.player, dt)
+    for i := 0; i < len(game.monsters); {
+        monster := &game.monsters[i]
+        monster_update(monster, &game.player, dt)
+
+        if monster.health <= 0 {
+            unordered_remove(&game.monsters, i)
+        } else {
+            i += 1
+        }
     }
-    for &projectile in game.projectiles {
-        projectile_update(&projectile, game, dt)
+    for i := 0; i < len(game.projectiles); {
+        projectile := &game.projectiles[i]
+        projectile_update(projectile, game, dt)
+
+        if projectile.done {
+            unordered_remove(&game.projectiles, i)
+        } else {
+            i += 1
+        }
     }
     player_update(&game.player, game, dt)
 }
@@ -206,8 +221,27 @@ player_update :: proc(p: ^Player, game: ^Game, dt: f32) {
     p.attack_timer += dt
     if p.attack_timer >= p.attack_threshold {
         p.attack_timer = 0
-        append(&game.projectiles, projectile_create(game.spritesheets[2], p.pos, &game.monsters[0]))
+        closest_monster := get_closest_monster(p.pos, game.monsters[:])
+        if closest_monster != nil {
+            append(&game.projectiles, projectile_create(game.spritesheets[2], p.pos, closest_monster))
+        }
     }
+}
+
+get_closest_monster :: proc(pos: [2]f32, monsters: []Monster) -> ^Monster {
+    if len(monsters) == 0 do return nil
+
+    lowest_distance2: f32 = linalg.length2(monsters[0].pos - pos)
+    closest: ^Monster = &monsters[0]
+    for &monster in monsters[1:] {
+        distance2 := linalg.length2(monster.pos - pos)
+        if distance2 < lowest_distance2 {
+            lowest_distance2 = distance2
+            closest = &monster
+        }
+    }
+
+    return closest
 }
 
 player_update_animation :: proc(p: ^Player, dt: f32) {
@@ -230,16 +264,18 @@ projectile_create :: proc(spritesheet: SpriteSheet, pos: [2]f32, target: ^Monste
         }
     }
     return Projectile {
-        pos, size, 20, 0, target, .Travel, animations
+        pos, size, 20, 0, false, target, .Travel, animations
     }
 }
 
 projectile_update :: proc(p: ^Projectile, game: ^Game, dt: f32) {
-    p.vel = linalg.normalize0(p.target.pos - p.pos) * linalg.length(p.vel)
-    p.pos += p.vel * dt
-    max_vel := f32(50)
-    p.vel.x = clamp(p.vel.x, -max_vel, max_vel)
-    p.vel.y = clamp(p.vel.y, -max_vel, max_vel)
+    if p.state == .Travel {
+        p.vel = linalg.normalize0(p.target.pos - p.pos) * linalg.length(p.vel)
+        p.pos += p.vel * dt
+        max_vel := f32(50)
+        p.vel.x = clamp(p.vel.x, -max_vel, max_vel)
+        p.vel.y = clamp(p.vel.y, -max_vel, max_vel)
+    }
 
     if linalg.length2(p.target.pos - p.pos) < 4 {
         p.state = .Impact
@@ -247,7 +283,7 @@ projectile_update :: proc(p: ^Projectile, game: ^Game, dt: f32) {
     if p.state == .Impact {
         p.impact_timer += dt
         if p.impact_timer >= 0.5 {
-            unordered_remove(&game.projectiles, 0)
+            p.done = true
             p.target.health -= 5
         }
     }
@@ -285,6 +321,7 @@ monster_create :: proc(spritesheet: SpriteSheet) -> Monster {
         frames = spritesheet.animations["Idle"]
     }
     return Monster {
+        health = 10,
         size = 8,
         animation = animation
     }
