@@ -16,7 +16,9 @@ Game :: struct {
     player: Player,
     monsters: [dynamic]Monster,
     projectiles: [dynamic]Projectile,
-    spritesheets: [dynamic]SpriteSheet
+    spritesheets: map[string]SpriteSheet,
+    spawn_interval: f32,
+    spawn_timer: f32
 }
 
 PlayerState :: enum {
@@ -130,13 +132,16 @@ main :: proc() {
 }
 
 game_create :: proc() -> (game: Game, ok: bool) {
-    spritesheets := make([dynamic]SpriteSheet)
+    spritesheets := make(map[string]SpriteSheet)
     slime_spritesheet := load_spritesheet("slime") or_return
-    append(&spritesheets, slime_spritesheet)
+    spritesheets["slime"] = slime_spritesheet
+    //append(&spritesheets, slime_spritesheet)
     ghost_spritesheet := load_spritesheet("ghost") or_return
-    append(&spritesheets, ghost_spritesheet)
+    spritesheets["ghost"] = ghost_spritesheet
+    //append(&spritesheets, ghost_spritesheet)
     magic_missile_spritesheet := load_spritesheet("magic-missile") or_return
-    append(&spritesheets, magic_missile_spritesheet)
+    spritesheets["magic-missile"] = magic_missile_spritesheet
+    //append(&spritesheets, magic_missile_spritesheet)
 
     player := player_create(slime_spritesheet)
     monster := monster_create(ghost_spritesheet)
@@ -148,12 +153,14 @@ game_create :: proc() -> (game: Game, ok: bool) {
         player,
         monsters,
         projectiles,
-        spritesheets
+        spritesheets,
+        5,
+        0
     }, true
 }
 
 game_destroy :: proc(game: ^Game) {
-    for spritesheet in game.spritesheets {
+    for _, spritesheet in game.spritesheets {
         spritesheet_destroy(spritesheet)
     }
 }
@@ -180,6 +187,12 @@ game_update :: proc(game: ^Game, dt: f32) {
         }
     }
     player_update(&game.player, game, dt)
+
+    game.spawn_timer += dt
+    if game.spawn_timer > game.spawn_interval {
+        game.spawn_timer = 0
+        //spawn_monsters()
+    }
 }
 
 game_draw :: proc(game: ^Game) {
@@ -209,7 +222,7 @@ player_create :: proc(spritesheet: SpriteSheet) -> Player {
 }
 
 player_update :: proc(p: ^Player, game: ^Game, dt: f32) {
-    player_update_animation(p, dt)
+    animation_update(&p.animations[p.state], dt)
     p.pos += p.vel * dt
     max_vel := f32(50)
     p.vel.x = clamp(p.vel.x, -max_vel, max_vel)
@@ -223,7 +236,7 @@ player_update :: proc(p: ^Player, game: ^Game, dt: f32) {
         p.attack_timer = 0
         closest_monster := get_closest_monster(p.pos, game.monsters[:])
         if closest_monster != nil {
-            append(&game.projectiles, projectile_create(game.spritesheets[2], p.pos, closest_monster))
+            append(&game.projectiles, projectile_create(game.spritesheets["magic-missile"], p.pos, closest_monster))
         }
     }
 }
@@ -244,8 +257,7 @@ get_closest_monster :: proc(pos: [2]f32, monsters: []Monster) -> ^Monster {
     return closest
 }
 
-player_update_animation :: proc(p: ^Player, dt: f32) {
-    animation := &p.animations[p.state]
+animation_update :: proc(animation: ^SpriteAnimation, dt: f32) {
     animation.secs_since_last_frame += dt
     duration := animation.frames[animation.current_frame].duration_secs
     if animation.secs_since_last_frame >= duration {
@@ -258,9 +270,13 @@ projectile_create :: proc(spritesheet: SpriteSheet, pos: [2]f32, target: ^Monste
     animations: [ProjectileState]SpriteAnimation
     for state in ProjectileState {
         state_name, _ := fmt.enum_value_to_string(state)
+        frames, ok := spritesheet.animations[state_name]
+        if !ok {
+            panic(fmt.tprintf("Projectile spritesheet doesn't contain animation for: %v", state_name))
+        }
         animations[state] = SpriteAnimation {
             texture = spritesheet.texture,
-            frames = spritesheet.animations[state_name]
+            frames = frames
         }
     }
     return Projectile {
@@ -328,7 +344,7 @@ monster_create :: proc(spritesheet: SpriteSheet) -> Monster {
 }
 
 monster_update :: proc(m: ^Monster, p: ^Player, dt: f32) {
-    monster_update_animation(m, dt)
+    animation_update(&m.animation, dt)
     speed := 40*dt
     direction := linalg.normalize0(p.pos - m.pos)
     m.vel += speed * direction
@@ -339,16 +355,6 @@ monster_update :: proc(m: ^Monster, p: ^Player, dt: f32) {
 
     m.vel.x -= 3*m.vel.x*dt
     m.vel.y -= 3*m.vel.y*dt
-}
-
-monster_update_animation :: proc(m: ^Monster, dt: f32) {
-    animation := &m.animation
-    animation.secs_since_last_frame += dt
-    duration := animation.frames[animation.current_frame].duration_secs
-    if animation.secs_since_last_frame >= duration {
-        animation.secs_since_last_frame = 0
-        animation.current_frame = (animation.current_frame + 1) % len(animation.frames)
-    }
 }
 
 monster_draw :: proc(m: ^Monster) {
